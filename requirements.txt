@@ -1,0 +1,9 @@
+mcp
+httpx
+python-dotenv
+flask
+langchain
+langchain-groq
+langchain-google-genai
+groq
+fpdf2

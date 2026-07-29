@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+immersive_chat_history.jsonl
+token_usage.txt
+chat_log.txt

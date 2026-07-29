@@ -1,0 +1,1434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jamaru - immersive preview</title>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --bg-2: #111111;
+    --text: #f2f0ea;
+    --text-soft: #8a887f;
+    --border: rgba(255,255,255,0.08);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  /* Theme toggle -- a cheap, literal "white becomes black, black becomes
+     white" swap via a full-page color invert, rather than redefining every
+     variable by hand. hue-rotate keeps any tinted colors looking natural
+     after the flip instead of shifting hue. */
+  /* The invert filter lives on .app-row (the actual page content), not on
+     body -- so #theme-wave, which sits outside .app-row, is never itself
+     affected by the filter it's synced with. That separation is what
+     keeps this a single clean transition (see below) instead of two. */
+  .app-row.inverted { filter: invert(1) hue-rotate(180deg); }
+  /* The logo images sit inside .app-row, so the invert above would hit
+     them too and turn the brand mark's real colors into odd
+     complementary ones. Applying the exact same filter a second time to
+     just the images cancels it out mathematically, so the logo always
+     reads correctly regardless of theme. */
+  .app-row.inverted .header-logo img,
+  .app-row.inverted #send .logo-icon {
+    filter: invert(1) hue-rotate(180deg);
+  }
+  /* Same problem, different element: any real image inside a reply
+     (generated pictures, NASA APOD, etc.) sits inside .app-row too, so
+     the theme-toggle invert was turning actual photos into color
+     negatives when switching to light mode. Counter-inverting them here
+     cancels that out, exactly like the logos above, so images always
+     look correct regardless of theme. */
+  .app-row.inverted .bubble img,
+  .app-row.inverted #side-logo img {
+    filter: invert(1) hue-rotate(180deg);
+  }
+  /* Wave transition -- ONE pass only: the wave instantly covers the whole
+     screen in the CURRENT (pre-toggle) color, the real theme flips
+     underneath while hidden behind it, then the wave shrinks back down to
+     the button, revealing the already-flipped page. No second snap. */
+  #theme-wave {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    pointer-events: none;
+    clip-path: circle(0px at var(--wx, 50%) var(--wy, 50%));
+  }
+  #theme-toggle {
+    margin-left: auto;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 13px;
+    transition: border-color 0.2s ease;
+  }
+  #theme-toggle:hover { border-color: var(--text); }
+  /* Interactive background: a soft glow that follows the cursor, like the
+     hover-reactive canvases on immersive-g.com. Pure CSS var updated via JS
+     mousemove -- no external libraries needed for this preview. */
+  #glow {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: radial-gradient(45vmin circle at var(--x, 50%) var(--y, 40%),
+      rgba(255,255,255,0.06), transparent 55%);
+    transition: background 0.05s linear;
+  }
+  #grain {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.035;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  /* Hidden "structure" underneath the page -- a motherboard-style circuit
+     pattern (traces + chip pads), invisible by default. A radial mask
+     centered on the cursor punches a window through it, so moving the
+     mouse feels like shining a light over a PCB and only the part
+     directly underneath lights up -- everywhere else stays pure black.
+     Sized in vmin, not a fixed px value, so the reveal window scales with
+     the actual screen/window size instead of looking tiny on a big
+     monitor or oversized on a small one. */
+  #structure {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    /* "white" (not "black") as the visible-center color -- some browsers
+       treat mask-image as an alpha mask (black = fully opaque, so visible)
+       while others treat it as a luminance mask (black = ~0 luminance, so
+       hidden). White reads as "fully visible" under BOTH interpretations,
+       so the reveal can't silently vanish depending on which mode a given
+       browser/version picks. Fully transparent at the edge -- pure black,
+       nothing visible at all -- until the cursor is actually there; only
+       hovering reveals it, on purpose. */
+    -webkit-mask-image: radial-gradient(18vmin circle at var(--x, 50%) var(--y, 40%), white 0%, white 35%, transparent 72%);
+    mask-image: radial-gradient(18vmin circle at var(--x, 50%) var(--y, 40%), white 0%, white 35%, transparent 72%);
+    transition: opacity 0.2s ease;
+  }
+  /* Suppressed while the cursor is over a message bubble or the input --
+     the board shouldn't fight for attention with the text you're reading
+     or typing, only the empty backdrop reveals it. */
+  #structure.suppressed, #glow.suppressed { opacity: 0; }
+  #structure svg { width: 100%; height: 100%; display: block; }
+  /* Traces feeding the CPU look alive -- dashes marching along each line
+     toward the chip, like current/data flowing in. */
+  .trace-flow path {
+    stroke-dasharray: 6 10;
+    animation: trace-move 2.4s linear infinite;
+  }
+  /* Positive offset direction -- dashes travel from each part backward
+     toward the CPU (path start), matching "signal flowing into the CPU". */
+  @keyframes trace-move { to { stroke-dashoffset: 160; } }
+  /* Brief emphasis on the one chip + trace actually "in use" for a given
+     step -- purely additive on top of the existing ambient flow, so
+     nothing about the idle board changes. Fades back on its own via the
+     transition once the class is removed. */
+  .chip-active-rect {
+    stroke: #ffffff;
+    stroke-opacity: 1;
+    filter: drop-shadow(0 0 7px rgba(255,255,255,0.55));
+    transition: filter 0.35s ease, stroke-opacity 0.35s ease;
+  }
+  .chip-active-text {
+    fill: #ffffff;
+    fill-opacity: 1;
+    transition: fill-opacity 0.35s ease;
+  }
+  .trace-active {
+    stroke: #ffffff !important;
+    stroke-opacity: 1 !important;
+    stroke-width: 3 !important;
+    filter: drop-shadow(0 0 5px rgba(255,255,255,0.6));
+    transition: stroke-width 0.35s ease, filter 0.35s ease;
+  }
+  .app-row {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    height: 100vh;
+  }
+  /* Adjustable side panel -- plain, dark, deliberately NOT part of the
+     hover-reveal effect (that stays on the main chat area only, per
+     explicit instruction). Drag the handle on its right edge to resize. */
+  .side-panel {
+    width: 260px;
+    min-width: 180px;
+    max-width: 420px;
+    flex-shrink: 0;
+    background: #0d0d0d;
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 22px 14px;
+    position: relative;
+    /* Same fix as .layout needed earlier -- without an explicit z-index,
+       this element never establishes its own stacking context, so the
+       #side-logo watermark below (z-index:-1) would paint at the parent's
+       stacking level instead of locally behind this panel's own opaque
+       background, hiding it completely. */
+    z-index: 0;
+  }
+  /* Faint logo watermark, hidden by default -- same cursor-following
+     reveal mechanic as the main board (#structure), just showing the
+     brand mark instead of circuitry, and scoped to this panel only. */
+  #side-logo {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    -webkit-mask-image: radial-gradient(22vmin circle at var(--sx, 50%) var(--sy, 50%), white 0%, white 40%, transparent 75%);
+    mask-image: radial-gradient(22vmin circle at var(--sx, 50%) var(--sy, 50%), white 0%, white 40%, transparent 75%);
+  }
+  #side-logo img { width: 55%; height: auto; opacity: 0.5; object-fit: contain; }
+  .side-panel .panel-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-soft);
+    padding: 0 8px 14px;
+  }
+  .side-panel .convo-item {
+    padding: 10px 10px;
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-soft);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .side-panel .convo-item:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+  .side-panel .convo-item.active {
+    position: relative;
+    background: rgba(255,255,255,0.07);
+    color: var(--text);
+  }
+  /* A tiny spark of light traveling around the active item's border -- a
+     miniature callback to the main board's circuitry, so the sidebar
+     doesn't feel like a separate, plain component. */
+  @property --spark-angle {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 0deg;
+  }
+  .side-panel .convo-item.active::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 8px;
+    padding: 1px;
+    background: conic-gradient(from var(--spark-angle), transparent 0deg, transparent 300deg, rgba(255,255,255,0.9) 330deg, transparent 360deg);
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: spark-rotate 2.4s linear infinite;
+    pointer-events: none;
+  }
+  @keyframes spark-rotate { to { --spark-angle: 360deg; } }
+  .resize-handle {
+    position: absolute;
+    top: 0; right: -3px;
+    width: 6px;
+    height: 100%;
+    cursor: col-resize;
+    z-index: 3;
+  }
+  .resize-handle:hover, .resize-handle.dragging { background: rgba(255,255,255,0.12); }
+  .side-panel-footer {
+    margin-top: auto;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .side-panel-footer button {
+    background: none;
+    border: none;
+    color: var(--text-soft);
+    font-size: 12.5px;
+    text-align: left;
+    padding: 9px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+  }
+  .side-panel-footer button:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+  /* Full-page overlays for About and Tools, opened from the sidebar
+     footer. Kept plain/dark like the sidebar -- not part of the hover
+     circuit reveal. */
+  .info-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    background: rgba(5,5,5,0.92);
+    overflow-y: auto;
+    padding: 60px 40px;
+  }
+  .info-overlay.open { display: block; }
+  .info-overlay .close-btn {
+    position: fixed;
+    top: 20px; right: 28px;
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--text);
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 16px;
+  }
+  .info-overlay .close-btn:hover { border-color: var(--text); }
+  .info-overlay h2 {
+    font-size: 22px;
+    font-weight: 300;
+    max-width: 760px;
+    margin: 0 auto 30px;
+  }
+  .api-list {
+    max-width: 760px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+  }
+  .api-list .row {
+    display: flex;
+    justify-content: space-between;
+    padding: 14px 4px;
+    border-bottom: 1px solid var(--border);
+    font-size: 14px;
+    font-weight: 300;
+  }
+  .api-list .row .name { color: var(--text); }
+  .api-list .row .desc { color: var(--text-soft); text-align: right; max-width: 60%; }
+  .tool-grid {
+    max-width: 760px;
+    margin: 0 auto;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 14px;
+  }
+  /* Business cards -- black by default, showing only the tool name; on
+     hover a light sweeps across and the description surfaces instead of
+     the name, like information being highlighted into view rather than
+     printed as a static tooltip. */
+  .tool-card {
+    position: relative;
+    background: #000;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 10px;
+    height: 110px;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 14px;
+    cursor: default;
+  }
+  .tool-card::before {
+    content: "";
+    position: absolute;
+    top: 0; left: -60%;
+    width: 40%; height: 100%;
+    background: linear-gradient(115deg, transparent, rgba(255,255,255,0.16), transparent);
+    transition: left 0.6s ease;
+  }
+  .tool-card:hover::before { left: 120%; }
+  .tool-card .card-name {
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    color: var(--text);
+    text-transform: uppercase;
+    transition: opacity 0.2s ease;
+  }
+  .tool-card .card-desc {
+    position: absolute;
+    inset: 14px;
+    display: flex;
+    align-items: center;
+    text-align: center;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-soft);
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+  .tool-card:hover .card-name { opacity: 0; }
+  .tool-card:hover .card-desc { opacity: 1; transform: translateY(0); }
+  .layout {
+    position: relative;
+    /* Establishes its own stacking context (any z-index value works, this
+       is the smallest fix) -- WITHOUT this, .layout has no stacking
+       context of its own, so its background below paints at the parent
+       .app-row's stacking level instead of locally behind its own
+       z-index:-1 children (#structure, #glow). That made the opaque
+       background paint OVER the hover-reveal board, hiding it completely
+       no matter where the cursor was. This is the actual cause of the
+       "CPU/board never shows up" regression. */
+    z-index: 0;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    height: 100vh;
+    /* No max-width/centering here on purpose -- this box fills whatever
+       space is left next to the sidebar. It used to be capped at 860px
+       and centered, which left large, completely dead black gutters on
+       wide screens with nothing in them -- not even the hover-reveal
+       board, since #structure/#glow are sized to this element's own box.
+       Letting it fill the full remaining width means the board and the
+       chat area both actually use the whole page. */
+    padding: 0 40px;
+    /* Its own opaque background, not a transparent see-through to body --
+       body sits outside .app-row (so the invert filter never touches it,
+       on purpose, for the wave transition), which meant the chat area's
+       actual visible backdrop was body's un-inverted color showing
+       through, while only the sidebar (which has its own solid
+       background) appeared to flip. Giving .layout its own background
+       here puts the chat area's real backdrop inside the filtered
+       subtree too, so the whole page flips together. */
+    background: var(--bg);
+  }
+  header {
+    padding: 30px 4px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 1px solid var(--border);
+    letter-spacing: 0.02em;
+  }
+  /* Company mark in place of the plain status dot -- a small circular
+     window with perspective, so the logo can tilt in 3D while "liquid"
+     rises inside it during thinking/answering. */
+  .header-logo {
+    position: relative;
+    width: 20px; height: 20px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: #0d0d0d;
+    border: 1px solid var(--border);
+    flex-shrink: 0;
+    perspective: 200px;
+  }
+  .header-logo img {
+    position: relative;
+    z-index: 1;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    padding: 2px;
+    display: block;
+    transition: transform 0.4s ease;
+  }
+  .header-logo.filling img {
+    animation: logo-tilt 1.8s ease-in-out infinite;
+  }
+  @keyframes logo-tilt {
+    0%, 100% { transform: rotateY(0deg) rotateX(0deg); }
+    50% { transform: rotateY(18deg) rotateX(-10deg); }
+  }
+  .header-logo .liquid {
+    position: absolute;
+    left: -20%; right: -20%;
+    bottom: 0;
+    height: 0%;
+    background: linear-gradient(180deg, rgba(140,170,255,0.32), rgba(140,170,255,0.14));
+    border-radius: 45% 55% 60% 40% / 60% 50% 50% 40%;
+    transition: height 0.5s ease;
+  }
+  .header-logo.filling .liquid {
+    height: 65%;
+    animation: liquid-slosh 1.4s ease-in-out infinite alternate;
+  }
+  @keyframes liquid-slosh {
+    from { border-radius: 45% 55% 60% 40% / 60% 50% 50% 40%; }
+    to { border-radius: 55% 45% 40% 60% / 50% 60% 40% 50%; }
+  }
+  header h1 {
+    font-size: 15px;
+    font-weight: 500;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--text-soft);
+  }
+  header .new-chat {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 9px 16px;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: border-color 0.25s ease, background 0.25s ease;
+  }
+  header .new-chat:hover { border-color: var(--text); background: rgba(255,255,255,0.04); }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 60px 4px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+  .hero {
+    padding: 40px 0 10px;
+  }
+  .hero h2 {
+    font-size: clamp(30px, 5vw, 46px);
+    line-height: 1.15;
+    font-weight: 300;
+    margin: 0 0 14px;
+    letter-spacing: -0.01em;
+  }
+  .hero h2 em {
+    font-style: italic;
+    color: var(--text-soft);
+  }
+  .hero p {
+    font-size: 14px;
+    color: var(--text-soft);
+    max-width: 420px;
+    line-height: 1.6;
+  }
+  .msg-row { display: flex; }
+  .msg-row.user { justify-content: flex-end; }
+  .msg-row.assistant { justify-content: flex-start; }
+  /* Entrance for newly appended messages -- a soft rise + fade so the
+     conversation feels like it's assembling itself rather than just
+     popping into place. Only applied via JS to rows added after load. */
+  .msg-row.entering { animation: bubble-in 0.45s cubic-bezier(0.2, 0.6, 0.3, 1); }
+  @keyframes bubble-in {
+    from { opacity: 0; transform: translateY(14px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  /* Live status while an answer is being worked out -- mirrors the real
+     chatbot's status/tool events (see web_chatbot_stream.py's
+     _stream_reply): connecting, thinking, calling a tool with its reason,
+     then the final reply. Styled to match this theme's thin type and
+     minimal borders instead of a loud spinner. */
+  .live-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 300;
+    color: var(--text-soft);
+    padding: 4px 2px;
+  }
+  .live-status .pulse {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--text);
+    animation: status-pulse 1s ease-in-out infinite;
+  }
+  @keyframes status-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.85); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+  .live-status .status-text { transition: opacity 0.2s ease; }
+  /* Small collapsible "steps + reasoning" dropdown, shown above the final
+     answer once it lands -- collapsed by default, click to expand. */
+  .steps-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11.5px;
+    font-weight: 300;
+    color: var(--text-soft);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 12px;
+    cursor: pointer;
+    margin-bottom: 8px;
+    user-select: none;
+  }
+  .steps-toggle:hover { border-color: rgba(255,255,255,0.22); color: var(--text); }
+  .steps-toggle .chev {
+    display: inline-block;
+    font-size: 9px;
+    transition: transform 0.2s ease;
+  }
+  .steps-toggle.open .chev { transform: rotate(90deg); }
+  .steps-box {
+    display: none;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    font-weight: 300;
+    color: var(--text-soft);
+    max-width: 72%;
+  }
+  .steps-box.open { display: block; }
+  .steps-box .step-line { padding: 3px 0; }
+  .bubble {
+    max-width: 72%;
+    padding: 16px 20px;
+    line-height: 1.65;
+    font-size: 15px;
+    font-weight: 300;
+    white-space: pre-wrap;
+    /* Long unbroken strings (a pollinations.ai URL has no real spaces --
+       "%20" is just three characters, not a space) don't wrap on their
+       own by default, so they were overflowing straight past the
+       bubble's own background/border instead of staying inside it. This
+       forces any long token to break wherever needed so it always stays
+       inside the box. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    transition: transform 0.2s ease, background 0.2s ease;
+  }
+  /* Real tables for the markdown-style pipe tables the model replies
+     with -- rendered as an actual <table> now instead of raw "| a | b |"
+     text, sized to the bubble (never wider) so it can't push past the
+     chat box either. */
+  .chat-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 10px;
+    font-size: 13px;
+    table-layout: fixed;
+  }
+  .chat-table th, .chat-table td {
+    border: 1px solid rgba(128,128,128,0.35);
+    padding: 6px 9px;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+  .chat-table th {
+    font-weight: 600;
+    color: var(--text);
+    background: rgba(128,128,128,0.14);
+  }
+  .bubble.user {
+    background: var(--text);
+    color: #0a0a0a;
+    border-radius: 18px;
+    border-bottom-right-radius: 4px;
+  }
+  .bubble.assistant {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    border-bottom-left-radius: 4px;
+  }
+  .bubble.assistant:hover {
+    border-color: rgba(255,255,255,0.22);
+    transform: translateY(-1px);
+  }
+  .composer {
+    position: relative;
+    padding: 20px 4px 30px;
+    display: flex;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+  }
+  /* Small badge that appears to the left of the input while the user is
+     actively typing -- a minimal keyboard glyph, drawn in plain shapes so
+     no external image asset is needed. Sits inline in the composer's flex
+     row, width-collapsed to 0 when hidden so it never disturbs layout. */
+  #typing-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 0;
+    flex-shrink: 0;
+    overflow: hidden;
+    color: var(--text-soft);
+    opacity: 0;
+    transition: width 0.2s ease, opacity 0.2s ease, margin 0.2s ease;
+  }
+  #typing-indicator.visible { width: 26px; opacity: 1; margin-right: 4px; }
+  #typing-indicator svg { display: block; }
+  #typing-indicator .key {
+    animation: key-tap 1s ease-in-out infinite;
+  }
+  #typing-indicator .key:nth-child(2) { animation-delay: 0.15s; }
+  #typing-indicator .key:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes key-tap {
+    0%, 100% { opacity: 0.35; }
+    50% { opacity: 1; }
+  }
+  #input {
+    flex: 1;
+    border: 1px solid var(--border);
+    background: var(--bg-2);
+    color: var(--text);
+    border-radius: 999px;
+    padding: 15px 22px;
+    font-size: 15px;
+    font-weight: 300;
+    outline: none;
+    transition: border-color 0.25s ease;
+  }
+  #input::placeholder { color: var(--text-soft); }
+  #input:focus { border-color: rgba(255,255,255,0.3); }
+  #send {
+    width: 50px; height: 50px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    font-size: 18px;
+    cursor: pointer;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.25s ease, transform 0.15s ease, border-color 0.25s ease;
+  }
+  #send .arrow { display: inline-block; }
+  /* Swapped in for the arrow while a message is out for an answer -- the
+     company mark stands in for a spinner. Reverts to the arrow once the
+     reply comes back. */
+  #send .logo-icon {
+    display: none;
+    width: 20px; height: 20px;
+    object-fit: contain;
+    animation: logo-pulse 1.1s ease-in-out infinite;
+  }
+  #send.sending .arrow { display: none; }
+  #send.sending .logo-icon { display: block; }
+  @keyframes logo-pulse {
+    0%, 100% { opacity: 0.55; transform: scale(0.94); }
+    50% { opacity: 1; transform: scale(1.04); }
+  }
+  /* Hovering the button while a response is generating reveals a small
+     pause/stop glyph in place of the logo -- click it to cancel early. */
+  #send .pause-icon { display: none; }
+  #send.sending:hover .logo-icon { display: none; }
+  #send.sending:hover .pause-icon { display: flex; }
+  #send .pause-icon {
+    width: 20px; height: 20px;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+  }
+  #send .pause-icon span {
+    width: 4px; height: 12px;
+    background: currentColor;
+    border-radius: 1px;
+  }
+  #send:hover { background: var(--text); color: #0a0a0a; border-color: var(--text); }
+  #send:active { transform: scale(0.94); }
+  /* Launch animation on send -- the arrow shoots up and fades like a
+     takeoff, then the button resets in place for the next message. */
+  #send.launching { animation: launch 0.5s cubic-bezier(0.3, 0, 0.4, 1); }
+  #send.launching .arrow { animation: arrow-fly 0.5s cubic-bezier(0.3, 0, 0.4, 1); }
+  @keyframes launch {
+    0% { transform: scale(1); box-shadow: 0 0 0 rgba(255,255,255,0); }
+    35% { transform: scale(0.92); background: var(--text); color: #0a0a0a; border-color: var(--text); box-shadow: 0 0 22px rgba(255,255,255,0.35); }
+    100% { transform: scale(1); }
+  }
+  @keyframes arrow-fly {
+    0% { transform: translateY(0); opacity: 1; }
+    45% { transform: translateY(-22px); opacity: 0; }
+    46% { transform: translateY(16px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+  #messages::-webkit-scrollbar { width: 0; }
+</style>
+</head>
+<body>
+<div id="theme-wave"></div>
+<div class="app-row">
+  <div class="side-panel" id="side-panel">
+    <div id="side-logo" aria-hidden="true">
+      <img alt="" src="data:image/png;base64,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" />
+    </div>
+    <div class="panel-title">History</div>
+    <div id="convo-list">
+      <div class="convo-item active">Find me a recent paper on black hole entropy</div>
+      <div class="convo-item">What's the weather in Delhi right now</div>
+      <div class="convo-item">Draw me a wizard casting a spell</div>
+      <div class="convo-item">Convert 500 USD to INR</div>
+    </div>
+    <div class="side-panel-footer">
+      <button id="open-tools">Tools</button>
+      <button id="open-about">About</button>
+    </div>
+    <div class="resize-handle" id="resize-handle"></div>
+  </div>
+  <div class="layout">
+    <div id="glow"></div>
+    <div id="grain"></div>
+    <div id="structure">
+      <!-- Widened viewBox (900->1300) with everything shifted so the
+           board itself has more real sectors on it (NPU, NET added),
+           instead of the same handful of chips just getting stretched
+           thinner across the now much wider full-page layout. -->
+      <svg viewBox="0 0 1300 600" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <radialGradient id="cpuGlow" cx="50%" cy="50%" r="55%">
+            <stop offset="0%" stop-color="#3a3a3a" stop-opacity="0.9"/>
+            <stop offset="55%" stop-color="#161616" stop-opacity="0.55"/>
+            <stop offset="100%" stop-color="#000000" stop-opacity="0"/>
+          </radialGradient>
+        </defs>
+        <g class="trace-flow" fill="none" stroke="white" stroke-opacity="0.5" stroke-width="2">
+          <path id="trace-ram1" d="M650 250 V150 H375 V130"/>
+          <path id="trace-ram2" d="M650 250 V150 H505 V130"/>
+          <path id="trace-rom" d="M720 250 V150 H900 V150"/>
+          <path id="trace-ssd" d="M580 300 H370 V430"/>
+          <path id="trace-gpu" d="M720 300 H880 V380"/>
+          <path id="trace-npu" d="M555 320 H300 V255 H170"/>
+          <path id="trace-net" d="M745 300 H1000 V315 H1130"/>
+          <path d="M620 350 V470 H450"/>
+        </g>
+        <g fill="none" stroke="white" stroke-opacity="0.25" stroke-width="1">
+          <path d="M375 130 H505"/>
+          <path d="M900 150 V90"/>
+        </g>
+        <g stroke="white" stroke-opacity="0.6" stroke-width="1.5" fill="rgba(255,255,255,0.03)">
+          <rect id="chip-ram1-rect" x="320" y="80" width="110" height="50" rx="4"/>
+          <rect id="chip-ram2-rect" x="450" y="80" width="110" height="50" rx="4"/>
+          <rect id="chip-rom-rect" x="850" y="90" width="100" height="60" rx="4"/>
+          <rect id="chip-ssd-rect" x="300" y="430" width="140" height="70" rx="4"/>
+          <rect id="chip-gpu-rect" x="800" y="380" width="160" height="90" rx="4"/>
+          <rect id="chip-npu-rect" x="40" y="220" width="130" height="70" rx="4"/>
+          <rect id="chip-net-rect" x="1130" y="280" width="130" height="70" rx="4"/>
+        </g>
+        <g>
+          <rect x="555" y="205" width="190" height="190" fill="url(#cpuGlow)"/>
+          <rect x="580" y="250" width="140" height="100" rx="6" fill="#0d0d0d" stroke="#3f3f3f" stroke-width="1.5"/>
+          <rect x="605" y="270" width="90" height="60" rx="3" fill="#181818" stroke="#454545" stroke-width="1"/>
+          <g stroke="#3f3f3f" stroke-width="2">
+            <path d="M595 258 V246 M615 258 V246 M635 258 V246 M655 258 V246 M675 258 V246 M695 258 V246 M705 258 V246"/>
+            <path d="M595 342 V354 M615 342 V354 M635 342 V354 M655 342 V354 M675 342 V354 M695 342 V354 M705 342 V354"/>
+          </g>
+        </g>
+        <g fill="white" fill-opacity="0.55" font-size="12" letter-spacing="1" text-anchor="middle">
+          <text x="650" y="304" fill="#a8a8a8" fill-opacity="0.9">CPU</text>
+          <text id="chip-ram1-text" x="375" y="109">RAM</text>
+          <text id="chip-ram2-text" x="505" y="109">RAM</text>
+          <text id="chip-rom-text" x="900" y="124">ROM</text>
+          <text id="chip-ssd-text" x="370" y="469">SSD</text>
+          <text id="chip-gpu-text" x="880" y="429">GPU</text>
+          <text id="chip-npu-text" x="105" y="259">NPU</text>
+          <text id="chip-net-text" x="1195" y="319">NET</text>
+        </g>
+      </svg>
+    </div>
+    <header>
+      <div class="header-logo" id="header-logo">
+        <div class="liquid"></div>
+        <!-- Recreated as a vector mark (not a raster PNG) -- two mirrored
+             wing/leaf shapes forming the same butterfly-like emblem from
+             the uploaded logo, in the same soft lavender tone. -->
+        <img alt="" src="data:image/png;base64,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" />
+      </div>
+      <h1>Jamaru</h1>
+      <button id="theme-toggle" title="Toggle theme">&#9680;</button>
+      <button id="new-chat-btn" class="new-chat">New chat</button>
+    </header>
+    <div id="messages">
+      <div class="hero">
+        <h2>Ask anything.<br><em>Get a real answer.</em></h2>
+        <p>Jamaru connects to live tools -- weather, currency, research papers, images -- and answers with real data, not guesses.</p>
+      </div>
+    </div>
+    <div class="composer">
+      <div id="typing-indicator">
+        <svg width="20" height="14" viewBox="0 0 20 14">
+          <rect class="key" x="1" y="1" width="4" height="4" rx="1" fill="currentColor"/>
+          <rect class="key" x="8" y="1" width="4" height="4" rx="1" fill="currentColor"/>
+          <rect class="key" x="15" y="1" width="4" height="4" rx="1" fill="currentColor"/>
+          <rect x="1" y="8" width="18" height="5" rx="2" fill="none" stroke="currentColor" stroke-width="1"/>
+        </svg>
+      </div>
+      <input id="input" type="text" placeholder="Ask anything..." autocomplete="off" />
+      <button id="send" title="Send (Enter) -- click again while answering to stop">
+        <span class="arrow">&#8594;</span>
+        <span class="pause-icon"><span></span><span></span></span>
+        <img class="logo-icon" alt="" src="data:image/png;base64,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" />
+      </button>
+    </div>
+  </div>
+</div>
+
+<div class="info-overlay" id="about-overlay">
+  <button class="close-btn" id="close-about">&times;</button>
+  <h2>About Jamaru</h2>
+  <div class="api-list">
+    <div class="row"><span class="name">Groq (Llama 3.3 70B)</span><span class="desc">Primary model, fast inference</span></div>
+    <div class="row"><span class="name">Gemini 3.5 Flash Lite</span><span class="desc">Fallback if Groq rate-limits</span></div>
+    <div class="row"><span class="name">LangChain</span><span class="desc">Model orchestration + tool binding</span></div>
+    <div class="row"><span class="name">MCP (Model Context Protocol)</span><span class="desc">Streamable HTTP, connects to all tools below</span></div>
+    <div class="row"><span class="name">Open-Meteo</span><span class="desc">Live weather data</span></div>
+    <div class="row"><span class="name">Frankfurter</span><span class="desc">Currency conversion rates</span></div>
+    <div class="row"><span class="name">Wikipedia REST API</span><span class="desc">Article lookup and summaries</span></div>
+    <div class="row"><span class="name">Arxiv API</span><span class="desc">Research paper search</span></div>
+    <div class="row"><span class="name">YouTube search</span><span class="desc">Video results with links</span></div>
+    <div class="row"><span class="name">Pollinations</span><span class="desc">AI image generation</span></div>
+    <div class="row"><span class="name">Kroki</span><span class="desc">Diagram generation</span></div>
+    <div class="row"><span class="name">NASA APOD</span><span class="desc">Astronomy picture of the day</span></div>
+  </div>
+</div>
+
+<div class="info-overlay" id="tools-overlay">
+  <button class="close-btn" id="close-tools">&times;</button>
+  <h2>Tools connected</h2>
+  <div class="tool-grid">
+    <div class="tool-card"><span class="card-name">Weather</span><span class="card-desc">Live conditions and forecast for any city</span></div>
+    <div class="tool-card"><span class="card-name">Currency</span><span class="card-desc">Convert between currencies at current rates</span></div>
+    <div class="tool-card"><span class="card-name">Wikipedia</span><span class="card-desc">Look up and summarize any article</span></div>
+    <div class="tool-card"><span class="card-name">Arxiv</span><span class="card-desc">Search recent research papers by topic</span></div>
+    <div class="tool-card"><span class="card-name">YouTube</span><span class="card-desc">Find videos with real, clickable links</span></div>
+    <div class="tool-card"><span class="card-name">Image gen</span><span class="card-desc">Generate an image from a text prompt</span></div>
+    <div class="tool-card"><span class="card-name">Diagrams</span><span class="card-desc">Render flowcharts and diagrams on request</span></div>
+    <div class="tool-card"><span class="card-name">PDF export</span><span class="card-desc">Turn any answer into a downloadable PDF</span></div>
+    <div class="tool-card"><span class="card-name">Web search</span><span class="card-desc">Pull current information from the live web</span></div>
+  </div>
+</div>
+<script>
+  // Wave transition -- exactly one visible motion: the wave instantly
+  // covers the whole screen in whatever color is CURRENTLY showing, the
+  // real theme flips underneath while hidden behind it, then the wave
+  // shrinks away to reveal the flipped page. The invert filter lives on
+  // .app-row only (not body), so body's own background never actually
+  // changes -- reading it for "the current color" was the bug behind the
+  // transition looking wrong on every other click. Using the two known
+  // literal colors for each state fixes that.
+  const themeToggleBtn = document.getElementById('theme-toggle');
+  const themeWave = document.getElementById('theme-wave');
+  const appRow = document.querySelector('.app-row');
+  themeToggleBtn.addEventListener('click', () => {
+    const rect = themeToggleBtn.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    themeWave.style.setProperty('--wx', cx + 'px');
+    themeWave.style.setProperty('--wy', cy + 'px');
+
+    // Snap instantly to fully covering, in whatever color is actually
+    // showing right now -- no transition yet, so this doesn't flicker.
+    const currentlyInverted = appRow.classList.contains('inverted');
+    themeWave.style.background = currentlyInverted ? '#f5f5f2' : '#0a0a0a';
+    themeWave.style.transition = 'none';
+    themeWave.style.clipPath = `circle(150% at ${cx}px ${cy}px)`;
+    void themeWave.offsetHeight; // force the covered state to actually paint
+
+    // Flip the real theme now, while it's completely hidden behind the
+    // wave -- invisible to the user.
+    appRow.classList.toggle('inverted');
+
+    // Next frame, animate the wave shrinking away, revealing the
+    // already-flipped page underneath. This is the only visible motion.
+    requestAnimationFrame(() => {
+      themeWave.style.transition = 'clip-path 0.7s cubic-bezier(0.4, 0, 0.2, 1)';
+      themeWave.style.clipPath = `circle(0px at ${cx}px ${cy}px)`;
+    });
+  });
+
+  const glow = document.getElementById('glow');
+  const structure = document.getElementById('structure');
+  const layoutEl = document.querySelector('.layout');
+  layoutEl.addEventListener('mousemove', (e) => {
+    const rect = layoutEl.getBoundingClientRect();
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+    glow.style.setProperty('--x', xPct + '%');
+    glow.style.setProperty('--y', yPct + '%');
+    structure.style.setProperty('--x', xPct + '%');
+    structure.style.setProperty('--y', yPct + '%');
+  });
+
+  // Suppress the reveal effect whenever the cursor is over a message
+  // bubble or the input -- the board shouldn't compete with the text
+  // you're reading or typing, only the empty backdrop lights up.
+  function suppressReveal() {
+    glow.classList.add('suppressed');
+    structure.classList.add('suppressed');
+  }
+  function restoreReveal() {
+    glow.classList.remove('suppressed');
+    structure.classList.remove('suppressed');
+  }
+  layoutEl.addEventListener('mouseover', (e) => {
+    if (e.target.closest('.bubble, #input, .composer')) suppressReveal();
+  });
+  layoutEl.addEventListener('mouseout', (e) => {
+    if (e.target.closest('.bubble, #input, .composer') && !e.relatedTarget?.closest('.bubble, #input, .composer')) {
+      restoreReveal();
+    }
+  });
+
+  // Resizable side panel -- drag the thin strip on its right edge.
+  const sidePanel = document.getElementById('side-panel');
+  const sideLogo = document.getElementById('side-logo');
+  sidePanel.addEventListener('mousemove', (e) => {
+    const rect = sidePanel.getBoundingClientRect();
+    const xPct = ((e.clientX - rect.left) / rect.width) * 100;
+    const yPct = ((e.clientY - rect.top) / rect.height) * 100;
+    sideLogo.style.setProperty('--sx', xPct + '%');
+    sideLogo.style.setProperty('--sy', yPct + '%');
+  });
+  const handle = document.getElementById('resize-handle');
+  let dragging = false;
+  handle.addEventListener('mousedown', () => {
+    dragging = true;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+  });
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const newWidth = Math.min(420, Math.max(180, e.clientX));
+    sidePanel.style.width = newWidth + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.userSelect = '';
+  });
+
+  // About overlay -- fetches the real, current models/tools/protocol from
+  // the backend instead of showing a hardcoded guess.
+  let aboutLoaded = false;
+  document.getElementById('open-about').addEventListener('click', async () => {
+    document.getElementById('about-overlay').classList.add('open');
+    if (aboutLoaded) return;
+    try {
+      const res = await fetch('/about');
+      const data = await res.json();
+      const list = document.querySelector('#about-overlay .api-list');
+      list.innerHTML = `
+        <div class="row"><span class="name">${escapeHtml(data.primary_model)}</span><span class="desc">Primary model</span></div>
+        <div class="row"><span class="name">${escapeHtml(data.fallback_model)}</span><span class="desc">Fallback model</span></div>
+        <div class="row"><span class="name">${escapeHtml(data.framework)}</span><span class="desc">Framework</span></div>
+        <div class="row"><span class="name">${escapeHtml(data.protocol)}</span><span class="desc">Protocol</span></div>
+        <div class="row"><span class="name">${data.tool_count} tools</span><span class="desc">${escapeHtml(data.mcp_server)}</span></div>
+      `;
+      aboutLoaded = true;
+    } catch (err) {
+      // Leave the static fallback list in place -- About is a nice-to-have.
+    }
+  });
+  document.getElementById('close-about').addEventListener('click', () => {
+    document.getElementById('about-overlay').classList.remove('open');
+  });
+  document.getElementById('open-tools').addEventListener('click', () => {
+    document.getElementById('tools-overlay').classList.add('open');
+  });
+  document.getElementById('close-tools').addEventListener('click', () => {
+    document.getElementById('tools-overlay').classList.remove('open');
+  });
+
+  const convoList = document.getElementById('convo-list');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const messagesEl = document.getElementById('messages');
+  const headerLogo = document.getElementById('header-logo');
+  const heroHTML = document.querySelector('.hero').outerHTML; // captured before any messages are added
+  let currentSessionId = null;
+  let currentAbortController = null;
+
+  function escapeHtml(str) {
+    const div = document.createElement('div');
+    div.textContent = str;
+    return div.innerHTML;
+  }
+
+  function linkify(text) {
+    const escaped = escapeHtml(text);
+    return escaped.replace(/https?:\/\/[^\s<]+[^\s<.,)\]]/g, (url) =>
+      `<a href="${url}" target="_blank" rel="noopener" class="chat-link">${url}</a>`
+    );
+  }
+
+  // The model often replies with markdown-style pipe tables
+  // ("| Date | Temp |\n|---|---|\n| Jul 29 | 38C |"). Left as plain text
+  // those pipes just render as literal characters with no alignment --
+  // this detects that pattern and builds a real <table> instead, while
+  // leaving every other line as normal linkified text.
+  function isTableSeparatorRow(line) {
+    return /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(line);
+  }
+  function parseTableRow(line) {
+    return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  }
+  function renderMarkdownTable(lines) {
+    const header = parseTableRow(lines[0]);
+    const rows = lines.slice(2).map(parseTableRow);
+    let html = '<table class="chat-table"><thead><tr>';
+    header.forEach(h => { html += `<th>${linkify(h)}</th>`; });
+    html += '</tr></thead><tbody>';
+    rows.forEach(r => {
+      html += '<tr>';
+      r.forEach(c => { html += `<td>${linkify(c)}</td>`; });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    return html;
+  }
+  function renderTextWithTables(text) {
+    const lines = (text || '').split('\n');
+    let html = '';
+    let paragraph = [];
+    const flush = () => {
+      if (paragraph.length) {
+        html += linkify(paragraph.join('\n'));
+        paragraph = [];
+      }
+    };
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      if (line.includes('|') && i + 1 < lines.length && isTableSeparatorRow(lines[i + 1])) {
+        flush();
+        const tableLines = [line, lines[i + 1]];
+        let j = i + 2;
+        while (j < lines.length && lines[j].includes('|') && lines[j].trim() !== '') {
+          tableLines.push(lines[j]);
+          j++;
+        }
+        html += renderMarkdownTable(tableLines);
+        i = j;
+      } else {
+        paragraph.push(line);
+        i++;
+      }
+    }
+    flush();
+    return html;
+  }
+
+  function renderChart(chart) {
+    if (!chart) return '';
+    const items = chart.items || [];
+    const max = Math.max(...items.map(i => i.value), 1);
+    const unit = chart.unit ? ` ${chart.unit}` : '';
+    const bars = items.map(it => {
+      const pct = Math.max(4, (it.value / max) * 100);
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;font-size:12.5px;">
+        <div style="width:80px;flex-shrink:0;color:var(--text-soft);text-align:right;">${escapeHtml(it.label)}</div>
+        <div style="flex:1;background:rgba(128,128,128,0.25);border-radius:6px;height:14px;overflow:hidden;">
+          <div style="height:100%;background:var(--text);opacity:0.9;width:${pct}%;"></div>
+        </div>
+        <div style="width:50px;flex-shrink:0;color:var(--text-soft);">${it.value}${unit}</div>
+      </div>`;
+    }).join('');
+    return `<div style="margin-top:12px;padding:12px 14px;border:1px solid var(--border);border-radius:10px;">
+      <div style="font-size:13px;font-weight:500;margin-bottom:8px;">${escapeHtml(chart.title || 'Chart')}</div>
+      ${bars}
+    </div>`;
+  }
+
+  function renderAssistantContent(content, image, chart, pdf) {
+    let html = renderTextWithTables(content || '(no response)');
+    if (image && image.url) {
+      html += `<img src="${image.url}" style="max-width:100%;max-height:420px;object-fit:contain;border-radius:10px;margin-top:10px;display:block;" />`;
+    }
+    if (chart) html += renderChart(chart);
+    if (pdf && pdf.url) {
+      html += `<div style="margin-top:10px;"><a href="${pdf.url}" target="_blank" rel="noopener" class="chat-link">&#128196; ${escapeHtml(pdf.title || 'Download PDF')}</a></div>`;
+    }
+    return html;
+  }
+
+  function addUserMessage(text, animate) {
+    const row = document.createElement('div');
+    row.className = 'msg-row user' + (animate ? ' entering' : '');
+    row.innerHTML = `<div class="bubble user"></div>`;
+    row.querySelector('.bubble').textContent = text;
+    messagesEl.appendChild(row);
+  }
+
+  function addAssistantMessage(content, image, chart, animate, pdf) {
+    const row = document.createElement('div');
+    row.className = 'msg-row assistant' + (animate ? ' entering' : '');
+    const bubble = document.createElement('div');
+    bubble.className = 'bubble assistant';
+    bubble.innerHTML = renderAssistantContent(content, image, chart, pdf);
+    row.appendChild(bubble);
+    messagesEl.appendChild(row);
+  }
+
+  async function loadHistory() {
+    try {
+      const res = await fetch('/history');
+      const data = await res.json();
+      if (data.session_id) currentSessionId = data.session_id;
+      const turns = data.turns || [];
+      if (turns.length) document.querySelector('.hero')?.remove();
+      for (const turn of turns) {
+        if (turn.question) addUserMessage(turn.question, false);
+        if (turn.answer) addAssistantMessage(turn.answer, turn.image, turn.chart, false, turn.pdf);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    } catch (err) {
+      // Silent -- history is a nice-to-have, not critical to chat working.
+    }
+  }
+
+  function renderConvoItem(sessionId, preview, active) {
+    const item = document.createElement('div');
+    item.className = 'convo-item' + (active ? ' active' : '');
+    item.dataset.sessionId = sessionId;
+    item.textContent = preview || '(empty)';
+    item.title = preview || '';
+    item.addEventListener('click', () => openConversation(sessionId));
+    return item;
+  }
+
+  async function loadConversations(activeSessionHint) {
+    try {
+      const res = await fetch('/conversations');
+      const data = await res.json();
+      const convos = data.conversations || [];
+      convoList.innerHTML = '';
+      for (const c of convos) {
+        const active = !!(activeSessionHint && c.session_id === activeSessionHint);
+        convoList.appendChild(renderConvoItem(c.session_id, c.preview, active));
+      }
+    } catch (err) {
+      // Silent -- sidebar is a nice-to-have.
+    }
+  }
+
+  async function openConversation(sessionId) {
+    cancelActiveResponse();
+    await fetch('/open-conversation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    });
+    currentSessionId = sessionId;
+    messagesEl.innerHTML = '';
+    await loadHistory();
+    document.querySelectorAll('.convo-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.sessionId === sessionId);
+    });
+  }
+
+  // Small "typing..." badge -- appears the moment you start typing, hides
+  // itself 900ms after you stop, so it never lingers once you pause.
+  const typingIndicator = document.getElementById('typing-indicator');
+  let typingTimeout = null;
+  input.addEventListener('input', () => {
+    typingIndicator.classList.add('visible');
+    clearTimeout(typingTimeout);
+    typingTimeout = setTimeout(() => typingIndicator.classList.remove('visible'), 900);
+  });
+
+  // "New chat" -- resets the conversation back to the empty hero state,
+  // cancels anything mid-flight, and gets a genuinely new session_id from
+  // the backend so the model actually forgets prior context.
+  document.getElementById('new-chat-btn').addEventListener('click', async () => {
+    cancelActiveResponse();
+    const res = await fetch('/new-chat', { method: 'POST' });
+    const data = await res.json().catch(() => ({}));
+    if (data.session_id) currentSessionId = data.session_id;
+    messagesEl.innerHTML = heroHTML;
+    document.querySelectorAll('.convo-item').forEach(el => el.classList.remove('active'));
+    input.value = '';
+  });
+
+  function handleSend() {
+    // While a response is in flight, the send button doubles as a real
+    // stop button -- clicking (or hitting Enter) again aborts the actual
+    // in-flight fetch, not a fake timer.
+    if (sendBtn.classList.contains('sending')) {
+      cancelActiveResponse();
+      return;
+    }
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    sendBtn.classList.add('launching');
+    setTimeout(() => sendBtn.classList.remove('launching'), 500);
+
+    // Show this conversation in the sidebar the MOMENT the question is
+    // sent, before any reply exists.
+    if (currentSessionId) {
+      const existing = convoList.querySelector(`[data-session-id="${currentSessionId}"]`);
+      document.querySelectorAll('.convo-item').forEach(el => el.classList.remove('active'));
+      if (existing) {
+        existing.classList.add('active');
+      } else {
+        convoList.insertBefore(renderConvoItem(currentSessionId, text.slice(0, 60), true), convoList.firstChild);
+      }
+    }
+
+    document.querySelector('.hero')?.remove();
+    addUserMessage(text, true);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+
+    sendBtn.classList.add('sending');
+    headerLogo.classList.add('filling');
+    streamReply(text);
+  }
+
+  sendBtn.addEventListener('click', handleSend);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSend();
+  });
+
+  let currentStatusRow = null;
+
+  // Cancels the real in-flight request (the "pause" mechanism) -- aborts
+  // the fetch, which ends the NDJSON stream on both sides, and resets the
+  // UI back to idle.
+  function cancelActiveResponse() {
+    if (currentAbortController) {
+      currentAbortController.abort();
+      currentAbortController = null;
+    }
+    if (currentStatusRow) {
+      currentStatusRow.remove();
+      currentStatusRow = null;
+    }
+    sendBtn.classList.remove('sending');
+    headerLogo.classList.remove('filling');
+  }
+
+  // Briefly lights up the one chip + connecting trace actually "in use"
+  // for a step, on top of the board's existing ambient animation -- never
+  // touches or restarts that ambient flow, just adds emphasis for ~1.2s.
+  function activateChip(chip) {
+    if (!chip) return;
+    const rect = document.getElementById(`chip-${chip}-rect`);
+    const text = document.getElementById(`chip-${chip}-text`);
+    const trace = document.getElementById(`trace-${chip}`);
+    if (rect) rect.classList.add('chip-active-rect');
+    if (trace) trace.classList.add('trace-active');
+    if (text) text.classList.add('chip-active-text');
+    setTimeout(() => {
+      if (rect) rect.classList.remove('chip-active-rect');
+      if (text) text.classList.remove('chip-active-text');
+      if (trace) trace.classList.remove('trace-active');
+    }, 1200);
+  }
+
+  // Real streaming against the backend -- reads the NDJSON body from
+  // /chat exactly the way jamaru_stream.html's sendMessage() does, just
+  // adapted to this design's status/steps/chip UI. Each line is one of
+  // "status" | "tool" | "tool_done" | "final" (see web_chatbot_immersive.py's
+  // _stream_reply for the exact shape).
+  async function streamReply(text) {
+    const statusRow = document.createElement('div');
+    statusRow.className = 'msg-row assistant entering';
+    statusRow.innerHTML = `<div class="live-status"><span class="pulse"></span><span class="status-text">Connecting to your tools...</span></div>`;
+    messagesEl.appendChild(statusRow);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    currentStatusRow = statusRow;
+    const statusText = statusRow.querySelector('.status-text');
+    const steps = ['Connecting to your tools...'];
+
+    currentAbortController = new AbortController();
+
+    try {
+      const res = await fetch('/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: text }),
+        signal: currentAbortController.signal,
+      });
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const evt = JSON.parse(line);
+          if (evt.type === 'status') {
+            statusText.textContent = evt.data;
+            steps.push(evt.data);
+          } else if (evt.type === 'tool') {
+            statusText.textContent = evt.data.reason;
+            steps.push(evt.data.reason);
+            activateChip(evt.data.chip);
+          } else if (evt.type === 'tool_done') {
+            // If this specific call failed, record that in the steps
+            // trace (the "Reasoning" dropdown) instead of the visible
+            // chat reply -- the backend only puts a failure note in the
+            // actual reply text when the model couldn't produce a real
+            // answer despite it. If it recovered (e.g. fell back to a
+            // web search), the failure is expected/handled and belongs
+            // here, not bolted onto the answer as noise.
+            if (evt.data && evt.data.error) {
+              steps.push(`⚠ ${evt.data.name} failed: ${evt.data.error}`);
+            }
+          } else if (evt.type === 'final') {
+            statusRow.remove();
+            currentStatusRow = null;
+
+            const row = document.createElement('div');
+            row.className = 'msg-row assistant entering';
+            const wrap = document.createElement('div');
+            wrap.style.maxWidth = '82%';
+
+            if (steps.length > 1) {
+              const toggle = document.createElement('div');
+              toggle.className = 'steps-toggle';
+              toggle.innerHTML = `<span class="chev">&#9656;</span> Reasoning (${steps.length} steps)`;
+              const box = document.createElement('div');
+              box.className = 'steps-box';
+              box.innerHTML = steps.map(s => `<div class="step-line">${escapeHtml(s)}</div>`).join('');
+              toggle.addEventListener('click', () => {
+                toggle.classList.toggle('open');
+                box.classList.toggle('open');
+              });
+              wrap.appendChild(toggle);
+              wrap.appendChild(box);
+            }
+
+            const bubble = document.createElement('div');
+            bubble.className = 'bubble assistant';
+            bubble.innerHTML = renderAssistantContent(evt.data.content, evt.data.image, evt.data.chart, evt.data.pdf);
+            wrap.appendChild(bubble);
+            row.appendChild(wrap);
+            messagesEl.appendChild(row);
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+          }
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        // User hit the pause/stop button -- statusRow already removed by
+        // cancelActiveResponse(), nothing more to do.
+      } else {
+        if (currentStatusRow) { currentStatusRow.remove(); currentStatusRow = null; }
+        addAssistantMessage(`Connection error: ${err}`, null, null, true);
+      }
+    }
+
+    currentAbortController = null;
+    sendBtn.classList.remove('sending');
+    headerLogo.classList.remove('filling');
+  }
+
+  (async () => {
+    await loadHistory();
+    loadConversations(currentSessionId);
+  })();
+</script>
+</body>
+</html>
