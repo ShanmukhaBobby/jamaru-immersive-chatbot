@@ -546,6 +546,14 @@ def chat():
 
 if __name__ == "__main__":
     base.start_background_loop()
-    port = int(os.environ.get("IMMERSIVE_PORT", 5070))
+    # Render (and most hosting platforms) assign the port at deploy time
+    # via the standard PORT env var and expect the app to bind to it --
+    # ignoring that and always using IMMERSIVE_PORT's default would make
+    # the deploy fail with "no open port detected" since the platform's
+    # router can't reach the port the app actually opened. Checking PORT
+    # first means it works correctly once hosted, while IMMERSIVE_PORT
+    # still lets you pick a custom port for local runs, and 5070 remains
+    # the fallback for local runs when neither is set.
+    port = int(os.environ.get("PORT") or os.environ.get("IMMERSIVE_PORT") or 5070)
     print(f"web_chatbot_immersive running at http://0.0.0.0:{port}", flush=True)
     app.run(debug=False, host="0.0.0.0", port=port, threaded=True)
