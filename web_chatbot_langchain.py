@@ -1252,15 +1252,28 @@ def start_background_loop():
     # 30s wasn't enough margin for a hosted MCP server on a free tier that's
     # gone to sleep after being idle -- Render's own cold-start delay alone
     # can run 30-50s, before the connection handshake even starts. 90s gives
-    # real headroom for that, while still failing fast (rather than hanging
-    # forever) if the server is genuinely unreachable for some other reason.
+    # real headroom for that.
+    #
+    # IMPORTANT: this used to raise (and crash the whole process) if the MCP
+    # server didn't answer within 90s. That's exactly backwards for a hosted
+    # deployment -- a slow-to-wake or momentarily-down MCP server would take
+    # the ENTIRE chatbot down with it, in a crash-restart-crash loop, and the
+    # hosting platform would never even see an open port to mark the service
+    # "Live". The connection loop in _server_task() already retries forever
+    # in the background and reassigns mcp_session once it succeeds -- so
+    # instead of crashing here, just log a warning and let the Flask app
+    # start regardless. General questions and anything not needing a tool
+    # still work immediately; tool calls simply degrade gracefully (via the
+    # existing try/except around every tool call) until the MCP connection
+    # comes up on its own, with zero manual restarts needed either way.
     if not _ready.wait(timeout=90):
-        raise RuntimeError(
-            "Timed out waiting for MCP server connection (waited 90s). If "
-            "MCP_SERVER_URL points at a free-tier hosted server, it may have "
-            "been asleep and taken unusually long to wake up -- try running "
-            "this again. If it still times out, check that the URL and "
-            "MCP_AUTH_TOKEN (if set) are correct."
+        print(
+            "WARNING: MCP server hasn't connected yet after 90s -- starting "
+            "the web app anyway. Tool calls will fail until it connects, but "
+            "it keeps retrying in the background and will pick up on its "
+            "own once the MCP server responds. If MCP_SERVER_URL points at "
+            "a free-tier host, it may just be waking up from sleep.",
+            flush=True,
         )
 
 
