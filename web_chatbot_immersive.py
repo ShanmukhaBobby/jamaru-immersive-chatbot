@@ -532,8 +532,21 @@ def chat():
             # button) -- nothing to clean up, just let the generator end.
             raise
         except Exception as err:  # noqa: BLE001
+            # Never surface raw Python exception text to the user -- log the
+            # real error server-side (visible in Render's logs) for
+            # debugging, and show a plain, non-technical message in the
+            # chat itself. This is a catch-all for anything NOT already
+            # handled inside _stream_reply's own per-tool try/excepts (e.g.
+            # a genuinely unexpected bug), so no matter what breaks, the
+            # user only ever sees a clean sentence, never a stack trace or
+            # "'NoneType' object has no attribute ..."-style internals.
+            print(f"Unhandled error in /chat stream: {err!r}", flush=True)
             yield _sse_line("final", {
-                "content": f"Error: {err}", "chart": None, "image": None, "pdf": None,
+                "content": (
+                    "Something went wrong on my end while working on that -- "
+                    "please try asking again in a moment."
+                ),
+                "chart": None, "image": None, "pdf": None,
             })
 
     resp = Response(_generate(), mimetype="application/x-ndjson")

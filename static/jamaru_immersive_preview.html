@@ -1416,7 +1416,14 @@
         // cancelActiveResponse(), nothing more to do.
       } else {
         if (currentStatusRow) { currentStatusRow.remove(); currentStatusRow = null; }
-        addAssistantMessage(`Connection error: ${err}`, null, null, true);
+        // Never show a raw JS/network error string in the chat (e.g.
+        // "TypeError: Failed to fetch") -- log it for debugging, show a
+        // plain, non-technical message to the user instead.
+        console.error('Chat request failed:', err);
+        addAssistantMessage(
+          "Couldn't reach the server just now -- please check your connection and try again.",
+          null, null, true
+        );
       }
     }
 
