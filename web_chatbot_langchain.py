@@ -637,6 +637,21 @@ _groq_llm_notools = (
     else None
 )
 
+# Tool-less Gemini fallback -- same reasoning as _groq_llm_notools above,
+# but for the Gemini fallback path. Needed because if Groq hits its rate
+# limit (RateLimitError) while _groq_llm is still None (MCP not connected
+# yet), the ONLY other option is Gemini -- and _gemini_llm is ALSO None
+# until MCP connects (it needs the same tool schemas). Without this, a
+# Groq rate-limit during the MCP-not-ready window had no fallback at all
+# and fell through to the generic "something went wrong" error.
+_gemini_llm_notools = (
+    ChatGoogleGenerativeAI(
+        google_api_key=GOOGLE_API_KEY, model=GEMINI_MODEL, temperature=0.3, max_output_tokens=1600
+    )
+    if _GEMINI_AVAILABLE
+    else None
+)
+
 
 def _extract_balanced_json(text: str):
     """Ported verbatim from web_chatbot.py. Scan forward from the first '{'
@@ -853,7 +868,24 @@ def call_llm(msgs: list) -> dict:
                 "The assistant isn't ready yet (no GROQ_API_KEY configured). "
                 "Check the server's .env and restart."
             )
-        ai_msg = _groq_llm_notools.invoke(lc_msgs)
+        try:
+            ai_msg = _groq_llm_notools.invoke(lc_msgs)
+        except groq.RateLimitError as err:
+            # Same Groq->Gemini rate-limit fallback as the main path below,
+            # just using the tool-less Gemini model since _gemini_llm (the
+            # tool-bound one) is also None until MCP connects. Without this,
+            # a Groq rate-limit hit during the MCP-not-ready window had NO
+            # fallback and fell straight to the generic error message.
+            if _gemini_llm_notools is None:
+                raise RuntimeError(
+                    "Groq's rate limit was hit, and no GOOGLE_API_KEY is set "
+                    "for the Gemini fallback. Add one to .env, or wait for "
+                    "the limit to reset."
+                ) from err
+            logger.info("PROVIDER FALLBACK (no-tools): Groq rate-limited (%s) -> retrying with Gemini (%s)", err, GEMINI_MODEL)
+            ai_msg = _gemini_llm_notools.invoke(lc_msgs)
+            _log_token_usage(_usage_from_ai_message(ai_msg), f"{GEMINI_MODEL} (no-tools fallback from groq)")
+            return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
         _log_token_usage(_usage_from_ai_message(ai_msg), f"{GROQ_MODEL} (no-tools fallback, MCP not ready)")
         return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
 
