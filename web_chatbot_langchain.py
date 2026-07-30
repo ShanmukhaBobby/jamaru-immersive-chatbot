@@ -620,6 +620,23 @@ groq_tools = []  # OpenAI-format tool schemas -- same shape/role as in web_chatb
 _groq_llm = None
 _gemini_llm = None
 
+# Tool-less fallback model -- built immediately at import time (it only
+# needs GROQ_API_KEY/GROQ_MODEL, both available before MCP ever connects),
+# unlike _groq_llm above which needs the live MCP session's tool schemas
+# before it can be bound and is therefore None until _finish_setup() runs.
+# Without this, any chat message that arrives while MCP is still connecting
+# (or stuck retrying, e.g. the other Render service being asleep/down)
+# hits `_groq_llm.invoke(...)` on a None object and surfaces a raw
+# "'NoneType' object has no attribute 'invoke'" error to the user instead
+# of an actual reply. Using this fallback means the bot can still hold a
+# plain conversation (no tool calls -- it wasn't given any schemas) while
+# the real, tool-capable model finishes connecting in the background.
+_groq_llm_notools = (
+    ChatGroq(groq_api_key=GROQ_API_KEY, model_name=GROQ_MODEL, temperature=0.3, max_tokens=1600)
+    if GROQ_API_KEY
+    else None
+)
+
 
 def _extract_balanced_json(text: str):
     """Ported verbatim from web_chatbot.py. Scan forward from the first '{'
@@ -824,6 +841,21 @@ def call_llm(msgs: list) -> dict:
     returned, so process_message's tool-calling loop below is COMPLETELY
     unchanged from web_chatbot.py."""
     lc_msgs = _dicts_to_lc_messages(msgs)
+
+    if _groq_llm is None:
+        # MCP hasn't connected yet (still retrying in the background, e.g.
+        # a hosted MCP server waking up or down) -- answer in plain
+        # conversation with the tool-less fallback instead of throwing a
+        # raw AttributeError. Tool-dependent questions won't be fulfilled
+        # until the real connection finishes, but the chat stays usable.
+        if _groq_llm_notools is None:
+            raise RuntimeError(
+                "The assistant isn't ready yet (no GROQ_API_KEY configured). "
+                "Check the server's .env and restart."
+            )
+        ai_msg = _groq_llm_notools.invoke(lc_msgs)
+        _log_token_usage(_usage_from_ai_message(ai_msg), f"{GROQ_MODEL} (no-tools fallback, MCP not ready)")
+        return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
 
     provider_label = GROQ_MODEL
     try:
