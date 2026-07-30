@@ -299,6 +299,14 @@ SYSTEM_PROMPT = {
         "single plain sentence, only offer something genuinely answerable by "
         "an available tool, and skip it for small talk or answers that already "
         "fully close out the question."
+        "\n\n"
+        "CRITICAL: the follow-up suggestion is ALWAYS an addition to the real "
+        "answer, never a replacement for it. If a tool returned an actual "
+        "result (a joke, a fact, a number, a summary, etc.), you must state "
+        "that real result in full first. Never reply with only a question "
+        "like 'Want to hear another one?' or 'Want me to look that up?' when "
+        "you already have the real content sitting in the tool result and "
+        "haven't said it yet — that leaves the user with no answer at all."
     ),
 }
 
