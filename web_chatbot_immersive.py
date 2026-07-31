@@ -47,46 +47,92 @@ import web_chatbot_langchain as base
 # Per-tool human-readable "why" descriptions, shown live while loading --
 # identical to web_chatbot_stream.py's version.
 # ---------------------------------------------------------
-def _describe_tool(name: str, args: dict) -> str:
+# Short, human-readable label for each tool -- used in both the "matched
+# tool" and "activating" reasoning lines below, so the two stay consistent
+# without repeating a full description every time.
+_TOOL_LABEL = {
+    "get_coordinates": "location lookup",
+    "get_weather": "live weather data",
+    "get_weather_forecast": "forecast data",
+    "get_weather_history": "historical weather",
+    "get_exchange_rate": "currency exchange",
+    "get_exchange_rate_history": "currency history",
+    "get_random_joke": "joke generator",
+    "get_random_fact": "fact generator",
+    "get_nasa_apod": "NASA daily photo",
+    "get_wikipedia_summary": "Wikipedia lookup",
+    "get_github_user": "GitHub lookup",
+    "list_capabilities": "capability list",
+    "generate_image": "image generation",
+    "create_diagram": "diagram generation",
+    "search_youtube": "YouTube search",
+    "search_arxiv": "Arxiv search",
+    "show_chart": "chart builder",
+    "export_pdf": "PDF export",
+    "search_the_web": "web search",
+}
+
+
+def _tool_request_line(name: str, args: dict) -> str:
+    """One short line (aim for ~4-7 words) naming the SPECIFIC thing the
+    user's question was asking for, using the actual arguments the model
+    already extracted -- e.g. the place name, the currency codes, the
+    search query. This is what shows up FIRST in the Reasoning steps, so
+    it should read like "here's what I picked out of your question", not
+    a generic "using a tool" placeholder."""
     if name == "get_coordinates":
-        return f"Looking up the location of {args.get('place', 'that place')}"
+        return f"Need location of {args.get('place', 'that place')}"
     if name == "get_weather":
-        return "Checking current weather conditions"
+        return "Need current weather right now"
     if name == "get_weather_forecast":
-        return f"Getting the forecast for the next {args.get('days', 'few')} day(s)"
+        return f"Need {args.get('days', 'a few')}-day forecast"
     if name == "get_weather_history":
-        return "Looking up past recorded weather"
+        return "Need past weather records"
     if name == "get_exchange_rate":
-        return f"Checking today's {args.get('from_currency', '')}→{args.get('to_currency', '')} exchange rate"
+        return f"Need {args.get('from_currency', '?')}→{args.get('to_currency', '?')} rate"
     if name == "get_exchange_rate_history":
-        return "Checking exchange rates over that date range"
+        return "Need exchange rate history"
     if name == "get_random_joke":
-        return "Finding a joke"
+        return "Asked for a joke"
     if name == "get_random_fact":
-        return "Finding a random fact"
+        return "Asked for a random fact"
     if name == "get_nasa_apod":
-        return "Fetching NASA's picture of the day"
+        return "Asked for NASA's daily photo"
     if name == "get_wikipedia_summary":
-        return f"Looking up {args.get('topic', 'that topic')} on Wikipedia"
+        return f"Need summary on {args.get('topic', 'that topic')}"
     if name == "get_github_user":
-        return f"Looking up the GitHub profile for {args.get('username', '')}"
+        return f"Need GitHub profile {args.get('username', '')}"
     if name == "list_capabilities":
-        return "Checking what tools are available"
+        return "Asked what tools exist"
     if name == "generate_image":
-        return "Generating an AI image"
+        return f"Need image: {args.get('prompt', args.get('description', 'requested scene'))}"[:40]
     if name == "create_diagram":
-        return "Building a diagram"
+        return "Need a diagram made"
     if name == "search_youtube":
-        return f"Searching YouTube for \"{args.get('query', '')}\""
+        return f"Need YouTube results: {args.get('query', '')}"[:40]
     if name == "search_arxiv":
-        return f"Searching Arxiv for a paper on \"{args.get('query', '')}\""
+        return f"Need papers on {args.get('query', '')}"[:40]
     if name == "show_chart":
-        return "Building a chart"
+        return "Asked to visualize this data"
     if name == "export_pdf":
-        return "Generating a PDF"
+        return "Asked to export as PDF"
     if name == "search_the_web":
-        return f"Searching the web for \"{args.get('query', '')}\""
-    return f"Using {name}"
+        return f"Need current info: {args.get('query', '')}"[:40]
+    return f"Need data from {name}"
+
+
+def _reasoning_lines(name: str, args: dict) -> list:
+    """Three short lines shown in the Reasoning dropdown for one tool call:
+    (1) what was detected in the question, (2) which tool matched it, (3)
+    that it's now being activated. Deliberately short (a handful of words
+    each) and specific to THIS question -- not a rundown of every tool the
+    bot has available."""
+    label = _TOOL_LABEL.get(name, name.replace("_", " "))
+    return [
+        _tool_request_line(name, args),
+        f"Matched tool: {label}",
+        f"Activating {label} now",
+    ]
 
 
 # ---------------------------------------------------------
@@ -243,12 +289,11 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     also carries a "chip" field so the frontend's board visual can light
     up the real sector actually in use, instead of guessing from the
     user's wording."""
-    yield _sse_line("status", "Connecting to your MCP tools...")
+    yield _sse_line("status", "Reading your question")
 
     messages = _get_session_messages(session_id)
     messages.append({"role": "user", "content": user_input})
 
-    yield _sse_line("status", "Thinking...")
     data = base.call_llm(messages)
     choice = data["choices"][0]
 
@@ -264,10 +309,15 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
         for tool_call in choice["message"]["tool_calls"]:
             fn = tool_call["function"]
             args = json.loads(fn.get("arguments") or "{}")
-            reason = _describe_tool(fn["name"], args)
+            # Three short, question-specific lines instead of one generic
+            # "using X tool" line -- what was detected, which tool matched
+            # it, and that it's now activating. See _reasoning_lines above.
+            request_line, matched_line, activate_line = _reasoning_lines(fn["name"], args)
+            yield _sse_line("status", request_line)
+            yield _sse_line("status", matched_line)
             yield _sse_line("tool", {
                 "name": fn["name"],
-                "reason": reason,
+                "reason": activate_line,
                 "chip": _chip_for_tool(fn["name"]),
             })
 
@@ -348,7 +398,7 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
                 }
             )
 
-        yield _sse_line("status", "Working out the final answer...")
+        yield _sse_line("status", "Preparing final answer")
         data = base.call_llm(messages)
         choice = data["choices"][0]
 
