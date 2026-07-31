@@ -469,19 +469,33 @@
     letter-spacing: 0.14em;
     color: var(--text-soft);
   }
-  header .new-chat {
+  /* New-chat pill -- moved from the header (top-right) to the top of the
+     sidebar, above "History", per explicit request: a small icon+label
+     pill instead of a full-width text button, so it reads as a compact
+     action rather than competing with the header for attention. */
+  .side-panel .new-chat {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text);
     font-size: 11px;
     text-transform: uppercase;
     letter-spacing: 0.1em;
-    padding: 9px 16px;
+    padding: 7px 14px 7px 12px;
     border-radius: 999px;
     cursor: pointer;
+    margin-bottom: 16px;
     transition: border-color 0.25s ease, background 0.25s ease;
   }
-  header .new-chat:hover { border-color: var(--text); background: rgba(255,255,255,0.04); }
+  .side-panel .new-chat:hover { border-color: var(--text); background: rgba(255,255,255,0.04); }
+  .side-panel .new-chat .plus {
+    font-size: 14px;
+    line-height: 1;
+    font-weight: 400;
+  }
   #messages {
     flex: 1;
     overflow-y: auto;
@@ -758,6 +772,7 @@
     <div id="side-logo" aria-hidden="true">
       <img alt="" src="data:image/png;base64,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" />
     </div>
+    <button id="new-chat-btn" class="new-chat"><span class="plus">+</span> New</button>
     <div class="panel-title">History</div>
     <div id="convo-list">
       <div class="convo-item active">Find me a recent paper on black hole entropy</div>
@@ -841,7 +856,6 @@
       </div>
       <h1>Jamaru</h1>
       <button id="theme-toggle" title="Toggle theme">&#9680;</button>
-      <button id="new-chat-btn" class="new-chat">New chat</button>
     </header>
     <div id="messages">
       <div class="hero">
