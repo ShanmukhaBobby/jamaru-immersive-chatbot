@@ -398,7 +398,7 @@ SEARCH_WEB_TOOL = {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "The search query — phrase it like a real web search, not a restatement of the whole user question.",
+                    "description": "The search query — phrase it like a real web search, not a restatement of the whole user question. Keep it short: a few words, under 12 words. Never paste the full conversation or extra context into this field.",
                 },
             },
             "required": ["query"],
@@ -473,6 +473,64 @@ def _generate_pdf(title: str, content: str, host_url: str) -> str:
     return host_url.rstrip("/") + "/generated_pdfs/" + filename
 
 
+# ---------------------------------------------------------
+# Generic defense against oversized tool arguments -- applies to every tool,
+# not just search_the_web. The model occasionally generates a string
+# argument much longer than the tool actually needs (e.g. a huge image
+# prompt, or pasted conversation text into a field meant for a short
+# phrase). Several tools build a URL directly from an argument
+# (generate_image, create_diagram, search_the_web), so an oversized string
+# can trip a "too large" error at the HTTP layer regardless of which tool
+# it is. Capping every string argument here, once, before any tool is
+# called, closes off this whole class of failure for current AND future
+# tools -- not just the one that happened to break during testing.
+# ---------------------------------------------------------
+_ARG_MAX_CHARS_DEFAULT = 800
+_ARG_MAX_CHARS_OVERRIDES = {
+    # Fields that legitimately hold longer free-form content get a higher cap.
+    "diagram_source": 4000,
+    "content": 6000,       # export_pdf body text
+    "query": 300,          # matches _WEB_SEARCH_QUERY_MAX_CHARS below
+    "prompt": 1200,        # generate_image description
+}
+
+
+def _sanitize_tool_args(name: str, args: dict) -> dict:
+    """Truncate any string argument that exceeds a sane length before it's
+    ever sent to an external API. Logs when it happens so it's diagnosable
+    later instead of a guess."""
+    if not isinstance(args, dict):
+        return args
+    cleaned = {}
+    for key, value in args.items():
+        if isinstance(value, str):
+            cap = _ARG_MAX_CHARS_OVERRIDES.get(key, _ARG_MAX_CHARS_DEFAULT)
+            if len(value) > cap:
+                logger.info(
+                    "tool arg too long: tool=%s key=%s len=%d -> capped to %d",
+                    name, key, len(value), cap,
+                )
+                value = value[:cap]
+        cleaned[key] = value
+    return cleaned
+
+
+_WEB_SEARCH_QUERY_MAX_CHARS = 300  # generous cap for a "few words" search phrase
+_WEB_SEARCH_QUERY_RETRY_CHARS = 80  # if even the capped query still gets a 413, retry much shorter
+
+
+def _post_groq_web_search(query: str):
+    with httpx.Client(timeout=30.0) as client:
+        return client.post(
+            GROQ_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+            },
+            json={"model": "groq/compound-mini", "messages": [{"role": "user", "content": query}]},
+        )
+
+
 def call_groq_web_search(query: str) -> str:
     """Unchanged from web_chatbot.py: one isolated, stateless call to Groq's
     own groq/compound-mini (built-in Tavily-powered web search). This is
@@ -480,17 +538,23 @@ def call_groq_web_search(query: str) -> str:
     equivalent built-in live-search model, so if Groq itself is completely
     unreachable, this specific tool will surface that as a plain error
     message (same as before), rather than silently falling back to a
-    different search mechanism that doesn't exist yet."""
+    different search mechanism that doesn't exist yet.
+
+    Defensive addition: the model occasionally generates an abnormally long
+    `query` (e.g. pasting in extra context instead of a short search phrase),
+    which Groq's endpoint rejects with 413 Request Entity Too Large. We cap
+    the query length up front, and if a 413 still comes back (belt-and-braces),
+    we retry once with a much shorter, truncated query before giving up."""
+    original_len = len(query)
+    if original_len > _WEB_SEARCH_QUERY_MAX_CHARS:
+        logger.info(
+            "search_the_web: query too long (%d chars), truncating to %d",
+            original_len, _WEB_SEARCH_QUERY_MAX_CHARS,
+        )
+        query = query[:_WEB_SEARCH_QUERY_MAX_CHARS]
+
     try:
-        with httpx.Client(timeout=30.0) as client:
-            res = client.post(
-                GROQ_URL,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {GROQ_API_KEY}",
-                },
-                json={"model": "groq/compound-mini", "messages": [{"role": "user", "content": query}]},
-            )
+        res = _post_groq_web_search(query)
     except httpx.TimeoutException as err:
         raise RuntimeError(f"Web search timed out: {err}") from err
     except httpx.ConnectError as err:
@@ -499,6 +563,20 @@ def call_groq_web_search(query: str) -> str:
         raise RuntimeError(f"Web search request failed: {err}") from err
     except Exception as err:  # noqa: BLE001
         raise RuntimeError(f"Web search failed unexpectedly: {err}") from err
+
+    if res.status_code == 413 and len(query) > _WEB_SEARCH_QUERY_RETRY_CHARS:
+        logger.info("search_the_web: got 413 at %d chars, retrying at %d chars", len(query), _WEB_SEARCH_QUERY_RETRY_CHARS)
+        query = query[:_WEB_SEARCH_QUERY_RETRY_CHARS]
+        try:
+            res = _post_groq_web_search(query)
+        except httpx.TimeoutException as err:
+            raise RuntimeError(f"Web search timed out: {err}") from err
+        except httpx.ConnectError as err:
+            raise RuntimeError(f"Couldn't connect to Groq for web search: {err}") from err
+        except httpx.HTTPError as err:
+            raise RuntimeError(f"Web search request failed: {err}") from err
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(f"Web search failed unexpectedly: {err}") from err
 
     if res.status_code >= 400:
         raise RuntimeError(f"Web search API error {res.status_code}: {res.text[:300]}")
@@ -1084,6 +1162,7 @@ async def process_message(user_input: str, session_id: str, host_url: str):
         for tool_call in choice["message"]["tool_calls"]:
             fn = tool_call["function"]
             args = json.loads(fn.get("arguments") or "{}")
+            args = _sanitize_tool_args(fn["name"], args)
             activated.append({"name": fn["name"], "args": args})
 
             if fn["name"] == "show_chart":
