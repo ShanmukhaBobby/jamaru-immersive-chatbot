@@ -45,6 +45,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 from typing import Optional
 
@@ -577,6 +578,37 @@ def call_groq_web_search(query: str) -> str:
             raise RuntimeError(f"Web search request failed: {err}") from err
         except Exception as err:  # noqa: BLE001
             raise RuntimeError(f"Web search failed unexpectedly: {err}") from err
+
+    if res.status_code == 429:
+        # groq/compound-mini (the search-specific model) has its own, much
+        # smaller free-tier quota than the main chat model (roughly a couple
+        # hundred requests/day vs. much higher for llama-3.3-70b-versatile) --
+        # they're billed completely separately. That's why every other
+        # question keeps working fine while ONLY live web search starts
+        # failing: it's not the assistant being down, it's this one specific
+        # tool's own small daily allowance. A short wait-and-retry catches
+        # the common transient per-minute burst case; if it's the daily cap,
+        # the retry fails the same way and we say so plainly instead of a
+        # vague "rate limit" that makes it sound like the whole thing broke.
+        logger.info("search_the_web: got 429, waiting 2s and retrying once")
+        time.sleep(2)
+        try:
+            res = _post_groq_web_search(query)
+        except httpx.TimeoutException as err:
+            raise RuntimeError(f"Web search timed out: {err}") from err
+        except httpx.ConnectError as err:
+            raise RuntimeError(f"Couldn't connect to Groq for web search: {err}") from err
+        except httpx.HTTPError as err:
+            raise RuntimeError(f"Web search request failed: {err}") from err
+        except Exception as err:  # noqa: BLE001
+            raise RuntimeError(f"Web search failed unexpectedly: {err}") from err
+        if res.status_code == 429:
+            raise RuntimeError(
+                "Web search has hit its own small free-tier daily quota for now -- this "
+                "does not affect anything else the assistant can do (weather, currency, "
+                "facts, images, charts, PDFs, etc. all use separate quotas and still work). "
+                "Try a live-search question again in a little while."
+            )
 
     if res.status_code >= 400:
         raise RuntimeError(f"Web search API error {res.status_code}: {res.text[:300]}")

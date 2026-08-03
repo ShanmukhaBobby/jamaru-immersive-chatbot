@@ -303,6 +303,17 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     tool_errors = []
     tool_link_results = []
 
+    # Previously the Reasoning dropdown only ever showed steps when a tool
+    # was actually used -- a generic question answered straight from the
+    # model's own knowledge produced no reasoning trace at all, which made
+    # it look like the model skipped thinking about it rather than having
+    # deliberately decided no tool was needed. Make that decision visible
+    # too, symmetric with the tool-use case, but only when no tool is ever
+    # called this turn (checked once here, before the loop, not on every
+    # follow-up round after tools already ran).
+    if not choice["message"].get("tool_calls"):
+        yield _sse_line("status", "No tool needed -- answering from general knowledge")
+
     while choice["message"].get("tool_calls"):
         messages.append(choice["message"])
 
