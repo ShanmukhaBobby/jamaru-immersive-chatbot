@@ -418,6 +418,15 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     _set_session_messages(session_id, messages)
 
     final_content = choice["message"].get("content") or ""
+    # Pull off the hidden [[APPROACH: ...]] method tag (see SYSTEM_PROMPT) --
+    # present only when the model actually solved something via a specific
+    # method/formula, whether or not a tool was involved. Surfaced as one
+    # more Reasoning step, right before the answer, without disturbing any
+    # of the existing tool-detection steps above.
+    final_content, approach_note = base.extract_approach_tag(final_content)
+    if approach_note:
+        yield _sse_line("status", f"Approach: {approach_note}")
+
     # Only bolt a tool-failure note onto the VISIBLE reply when the model
     # genuinely couldn't produce a real answer despite the failure(s) --
     # if it fell back successfully (e.g. Wikipedia failed but a web search

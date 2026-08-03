@@ -319,8 +319,42 @@ SYSTEM_PROMPT = {
         "like 'Want to hear another one?' or 'Want me to look that up?' when "
         "you already have the real content sitting in the tool result and "
         "haven't said it yet — that leaves the user with no answer at all."
+        "\n\n"
+        "Method tag: if your answer required actually solving something -- a "
+        "calculation, a formula, a specific method (BODMAS/order of "
+        "operations, a financial valuation approach like DCF, a named "
+        "equation like Hamada's, a statistical method, etc.) -- end your "
+        "reply with one hidden line in exactly this format: "
+        "[[APPROACH: short method name, 3-8 words]] e.g. "
+        "[[APPROACH: BODMAS order of operations]] or "
+        "[[APPROACH: DCF valuation using Hamada's equation for relevered WACC]]. "
+        "This applies whether or not a tool was involved -- what matters is "
+        "whether you did real problem-solving to reach the number, not "
+        "whether a tool was called. This line is stripped out before the "
+        "user ever sees it, so never mention or explain it in your visible "
+        "answer, and never include it for casual, factual, or lookup-only "
+        "questions (weather, a joke, a plain currency lookup with no further "
+        "math, etc.) where no method was actually applied."
     ),
 }
+
+_APPROACH_TAG_RE = re.compile(r"\[\[APPROACH:\s*(.*?)\]\]\s*$", re.IGNORECASE | re.DOTALL)
+
+
+def extract_approach_tag(content: str):
+    """Pull the hidden [[APPROACH: ...]] method tag off the end of a model
+    reply, if present. Returns (cleaned_content, approach_text_or_None).
+    Shared by every chatbot variant that uses SYSTEM_PROMPT above, so the
+    raw tag never leaks into a visible reply anywhere, regardless of
+    whether that variant has a "Reasoning" UI to show it in."""
+    if not content:
+        return content, None
+    match = _APPROACH_TAG_RE.search(content)
+    if not match:
+        return content, None
+    approach = match.group(1).strip()
+    cleaned = content[: match.start()].rstrip()
+    return cleaned, approach or None
 
 # ---------------------------------------------------------
 # show_chart / search_the_web -- identical schemas to web_chatbot.py.
@@ -1294,6 +1328,11 @@ async def process_message(user_input: str, session_id: str, host_url: str):
     _set_session_messages(session_id, messages)
 
     final_content = choice["message"].get("content") or ""
+    # This chatbot variant has no "Reasoning" UI to show the hidden method
+    # tag in, so just strip it out -- otherwise the literal [[APPROACH: ...]]
+    # text would leak into the visible reply since SYSTEM_PROMPT is shared
+    # with web_chatbot_immersive.py, which DOES surface it (see there).
+    final_content, _ = extract_approach_tag(final_content)
     if tool_errors:
         # If a real tool failed this turn, make sure the actual reason shows
         # up somewhere in the reply -- don't let a vague, upbeat-sounding
