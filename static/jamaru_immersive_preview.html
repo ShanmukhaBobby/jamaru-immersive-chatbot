@@ -1063,6 +1063,34 @@
     return div.innerHTML;
   }
 
+  // Retries a generated image (Pollinations.ai / Kroki.io) a few times
+  // before giving up -- both services generate the image ON FIRST REQUEST,
+  // so a fresh prompt can take several seconds and the very first load
+  // attempt sometimes fails/times out with nothing else wrong. Re-requesting
+  // with a cache-busting query param (so the browser doesn't just replay
+  // the same failed response) usually succeeds within 2-3 tries. Only after
+  // genuinely giving up does this fall back to a plain clickable link, so
+  // the user is never just left staring at a permanently broken icon.
+  window.__retryChatImage = function(img) {
+    const tries = parseInt(img.dataset.retries || '0', 10);
+    if (tries >= 4) {
+      const link = document.createElement('a');
+      link.href = img.dataset.originalSrc;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.className = 'chat-link';
+      link.textContent = 'Image took too long to generate -- click to view it directly';
+      img.replaceWith(link);
+      return;
+    }
+    img.dataset.retries = String(tries + 1);
+    const delayMs = 1500 * (tries + 1);
+    setTimeout(() => {
+      const sep = img.dataset.originalSrc.includes('?') ? '&' : '?';
+      img.src = `${img.dataset.originalSrc}${sep}_retry=${Date.now()}`;
+    }, delayMs);
+  };
+
   function linkify(text) {
     const escaped = escapeHtml(text);
     return escaped.replace(/https?:\/\/[^\s<]+[^\s<.,)\]]/g, (url) =>
@@ -1151,7 +1179,18 @@
   function renderAssistantContent(content, image, chart, pdf) {
     let html = renderTextWithTables(content || '(no response)');
     if (image && image.url) {
-      html += `<img src="${image.url}" style="max-width:100%;max-height:420px;object-fit:contain;border-radius:10px;margin-top:10px;display:block;" />`;
+      // Pollinations.ai (generate_image) and Kroki.io (create_diagram) both
+      // generate the actual image ON FIRST REQUEST -- the URL doesn't point
+      // at an already-rendered file, it triggers generation right then,
+      // which can take several seconds for a fresh prompt. If the browser's
+      // first load attempt is slow or hiccups, it used to just show a
+      // permanently broken image icon with no retry. onerror now retries a
+      // few times with a short delay (re-requesting with a cache-busting
+      // param so it isn't just re-fetching the same failed response), and
+      // only falls back to a plain link after genuinely giving up.
+      html += `<img src="${escapeHtml(image.url)}" data-original-src="${escapeHtml(image.url)}" data-retries="0"
+        style="max-width:100%;max-height:420px;object-fit:contain;border-radius:10px;margin-top:10px;display:block;"
+        onerror="window.__retryChatImage(this)" />`;
     }
     if (chart) html += renderChart(chart);
     if (pdf && pdf.url) {
