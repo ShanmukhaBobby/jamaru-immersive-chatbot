@@ -855,6 +855,28 @@ def call_llm(msgs: list) -> dict:
     Returns the same {"choices": [{"message": {...}}]} shape call_groq
     returned, so process_message's tool-calling loop below is COMPLETELY
     unchanged from web_chatbot.py."""
+
+    def _invoke_gemini_fallback(llm, groq_err):
+        # Every "retry with Gemini" call site below used to call
+        # llm.invoke(lc_msgs) directly with NO try/except of its own -- if
+        # Gemini itself then failed (bad/expired key, Gemini's OWN rate
+        # limit, a network error), that second exception was never caught
+        # anywhere and propagated as a raw, unexplained error. This wraps
+        # every fallback call so a Gemini-side failure produces ONE clear
+        # message naming both providers, instead of a mysterious crash --
+        # this matters most exactly when it's needed most: mid-demo, when
+        # you have no time to dig through logs to figure out which of the
+        # two providers actually broke.
+        try:
+            return llm.invoke(lc_msgs)
+        except Exception as gemini_err:  # noqa: BLE001
+            raise RuntimeError(
+                f"Groq failed ({groq_err}) AND the Gemini fallback also "
+                f"failed ({gemini_err}). Check that GEMINI_API_KEY / "
+                f"GOOGLE_API_KEY on Render is a valid, non-expired key with "
+                f"quota remaining."
+            ) from gemini_err
+
     lc_msgs = _dicts_to_lc_messages(msgs)
 
     if _groq_llm is None:
@@ -883,7 +905,7 @@ def call_llm(msgs: list) -> dict:
                     "the limit to reset."
                 ) from err
             logger.info("PROVIDER FALLBACK (no-tools): Groq rate-limited (%s) -> retrying with Gemini (%s)", err, GEMINI_MODEL)
-            ai_msg = _gemini_llm_notools.invoke(lc_msgs)
+            ai_msg = _invoke_gemini_fallback(_gemini_llm_notools, err)
             _log_token_usage(_usage_from_ai_message(ai_msg), f"{GEMINI_MODEL} (no-tools fallback from groq)")
             return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
         _log_token_usage(_usage_from_ai_message(ai_msg), f"{GROQ_MODEL} (no-tools fallback, MCP not ready)")
@@ -903,7 +925,7 @@ def call_llm(msgs: list) -> dict:
             ) from err
         logger.info("PROVIDER FALLBACK: Groq rate-limited (%s) -> retrying with Gemini (%s)", err, GEMINI_MODEL)
         provider_label = f"{GEMINI_MODEL} (fallback from groq)"
-        ai_msg = _gemini_llm.invoke(lc_msgs)
+        ai_msg = _invoke_gemini_fallback(_gemini_llm, err)
         _log_token_usage(_usage_from_ai_message(ai_msg), provider_label)
         return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
     except groq.BadRequestError as err:
@@ -934,7 +956,7 @@ def call_llm(msgs: list) -> dict:
             ) from err
         logger.info("PROVIDER FALLBACK: Groq tool_use_failed (unrecoverable) -> retrying with Gemini (%s)", GEMINI_MODEL)
         provider_label = f"{GEMINI_MODEL} (fallback from groq tool_use_failed)"
-        ai_msg = _gemini_llm.invoke(lc_msgs)
+        ai_msg = _invoke_gemini_fallback(_gemini_llm, err)
         _log_token_usage(_usage_from_ai_message(ai_msg), provider_label)
         return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
 
