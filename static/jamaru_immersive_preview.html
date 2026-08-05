@@ -1207,9 +1207,39 @@
     messagesEl.appendChild(row);
   }
 
-  function addAssistantMessage(content, image, chart, animate, pdf) {
+  function addAssistantMessage(content, image, chart, animate, pdf, steps) {
     const row = document.createElement('div');
     row.className = 'msg-row assistant' + (animate ? ' entering' : '');
+
+    // Optional `steps` (only passed on history reload -- see loadHistory()
+    // below) rebuilds the same Reasoning toggle+box the live stream shows,
+    // so reopening a past conversation doesn't lose the trace that was
+    // visible moments earlier. Mirrors streamReply()'s "final" handler
+    // markup exactly; that live-stream code path itself is untouched.
+    if (steps && steps.length > 1) {
+      const wrap = document.createElement('div');
+      wrap.style.maxWidth = '82%';
+      const toggle = document.createElement('div');
+      toggle.className = 'steps-toggle';
+      toggle.innerHTML = `<span class="chev">&#9656;</span> Reasoning (${steps.length} steps)`;
+      const box = document.createElement('div');
+      box.className = 'steps-box';
+      box.innerHTML = steps.map(s => `<div class="step-line">${escapeHtml(s)}</div>`).join('');
+      toggle.addEventListener('click', () => {
+        toggle.classList.toggle('open');
+        box.classList.toggle('open');
+      });
+      wrap.appendChild(toggle);
+      wrap.appendChild(box);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble assistant';
+      bubble.innerHTML = renderAssistantContent(content, image, chart, pdf);
+      wrap.appendChild(bubble);
+      row.appendChild(wrap);
+      messagesEl.appendChild(row);
+      return;
+    }
+
     const bubble = document.createElement('div');
     bubble.className = 'bubble assistant';
     bubble.innerHTML = renderAssistantContent(content, image, chart, pdf);
@@ -1226,7 +1256,7 @@
       if (turns.length) document.querySelector('.hero')?.remove();
       for (const turn of turns) {
         if (turn.question) addUserMessage(turn.question, false);
-        if (turn.answer) addAssistantMessage(turn.answer, turn.image, turn.chart, false, turn.pdf);
+        if (turn.answer) addAssistantMessage(turn.answer, turn.image, turn.chart, false, turn.pdf, turn.steps);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
     } catch (err) {

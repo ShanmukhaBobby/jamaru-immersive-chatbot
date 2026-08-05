@@ -206,7 +206,7 @@ HISTORY_LOG_PATH = os.path.join(
 )
 
 
-def _log_history_turn(question: str, answer: str, session_id: str, chart=None, image=None, pdf=None) -> None:
+def _log_history_turn(question: str, answer: str, session_id: str, chart=None, image=None, pdf=None, steps=None) -> None:
     try:
         entry = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -216,6 +216,14 @@ def _log_history_turn(question: str, answer: str, session_id: str, chart=None, i
             "chart": chart,
             "image": image,
             "pdf": pdf,
+            # Previously the Reasoning trace only existed in the live SSE
+            # stream, never saved -- so reloading the page or reopening an
+            # older conversation from the sidebar showed the final answer
+            # with the "Reasoning" dropdown simply gone, even though it was
+            # there moments earlier. Persisting the same step lines the
+            # frontend already displayed live means history reload can
+            # rebuild an identical dropdown instead of losing it.
+            "steps": steps or [],
         }
         with open(HISTORY_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -289,6 +297,12 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     also carries a "chip" field so the frontend's board visual can light
     up the real sector actually in use, instead of guessing from the
     user's wording."""
+    # Mirrors exactly what the frontend's own `steps` array accumulates from
+    # this same SSE stream (see streamReply() in the static HTML) -- kept
+    # here too so the finished turn can be persisted and an identical
+    # Reasoning dropdown can be rebuilt later on history reload, instead of
+    # the trace only ever existing transiently in the live page.
+    steps = ["Connecting to your tools...", "Reading your question"]
     yield _sse_line("status", "Reading your question")
 
     messages = _get_session_messages(session_id)
@@ -313,6 +327,7 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     # follow-up round after tools already ran).
     if not choice["message"].get("tool_calls"):
         yield _sse_line("status", "No tool needed -- answering from general knowledge")
+        steps.append("No tool needed -- answering from general knowledge")
 
     while choice["message"].get("tool_calls"):
         messages.append(choice["message"])
@@ -325,12 +340,15 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
             # it, and that it's now activating. See _reasoning_lines above.
             request_line, matched_line, activate_line = _reasoning_lines(fn["name"], args)
             yield _sse_line("status", request_line)
+            steps.append(request_line)
             yield _sse_line("status", matched_line)
+            steps.append(matched_line)
             yield _sse_line("tool", {
                 "name": fn["name"],
                 "reason": activate_line,
                 "chip": _chip_for_tool(fn["name"]),
             })
+            steps.append(activate_line)
 
             errors_before = len(tool_errors)
             if fn["name"] == "show_chart":
@@ -400,6 +418,8 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
             # earlier, unrelated tool call.
             this_call_error = tool_errors[-1][1] if len(tool_errors) > errors_before else None
             yield _sse_line("tool_done", {"name": fn["name"], "error": this_call_error})
+            if this_call_error:
+                steps.append(f"⚠ {fn['name']} failed: {this_call_error}")
 
             messages.append(
                 {
@@ -410,6 +430,7 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
             )
 
         yield _sse_line("status", "Preparing final answer")
+        steps.append("Preparing final answer")
         data = base.call_llm(messages)
         choice = data["choices"][0]
 
@@ -426,6 +447,7 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     final_content, approach_note = base.extract_approach_tag(final_content)
     if approach_note:
         yield _sse_line("status", f"Approach: {approach_note}")
+        steps.append(f"Approach: {approach_note}")
 
     # Only bolt a tool-failure note onto the VISIBLE reply when the model
     # genuinely couldn't produce a real answer despite the failure(s) --
@@ -449,6 +471,11 @@ def _stream_reply(user_input: str, session_id: str, host_url: str):
     _log_history_turn(
         user_input, final_content, session_id,
         chart=chart_payload, image=image_payload, pdf=pdf_payload,
+        # Only worth persisting/showing the dropdown if there's more than
+        # the two baseline lines every turn always has -- matches the
+        # frontend's own `steps.length > 1` check for whether to render a
+        # Reasoning toggle at all.
+        steps=steps if len(steps) > 2 else [],
     )
 
     yield _sse_line("final", {

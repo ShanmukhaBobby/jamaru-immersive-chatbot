@@ -325,10 +325,21 @@ SYSTEM_PROMPT = {
         "operations, a financial valuation approach like DCF, a named "
         "equation like Hamada's, a statistical method, etc.) -- end your "
         "reply with one hidden line in exactly this format: "
-        "[[APPROACH: short method name, 3-8 words]] e.g. "
-        "[[APPROACH: BODMAS order of operations]] or "
-        "[[APPROACH: DCF valuation using Hamada's equation for relevered WACC]]. "
-        "This applies whether or not a tool was involved -- what matters is "
+        "[[APPROACH: name the method/term(s) used, then explain in a full "
+        "clause WHY that method fits this specific question -- what about "
+        "the question made this the right approach -- about 15-25 words, "
+        "still one line]] e.g. [[APPROACH: BODMAS (order of operations), "
+        "because the expression mixes addition, multiplication, and "
+        "brackets, so evaluating left-to-right without following precedence "
+        "would give the wrong result]] or [[APPROACH: DCF with Hamada's "
+        "equation, because the Year 4 recapitalization changes the debt-to-"
+        "equity ratio, which changes the levered beta and therefore the "
+        "WACC used to discount future cash flows]]. Name the actual term(s)/"
+        "method chosen AND connect it back to a specific detail in the "
+        "question -- not a generic definition of the method. Still just one "
+        "line, no restating the full numeric answer here. This applies "
+        "whether or not a tool was "
+        "involved -- what matters is "
         "whether you did real problem-solving to reach the number, not "
         "whether a tool was called. This line is stripped out before the "
         "user ever sees it, so never mention or explain it in your visible "
@@ -347,7 +358,7 @@ def extract_approach_tag(content: str):
     Shared by every chatbot variant that uses SYSTEM_PROMPT above, so the
     raw tag never leaks into a visible reply anywhere, regardless of
     whether that variant has a "Reasoning" UI to show it in."""
-    if not content:
+    if not content or not isinstance(content, str):
         return content, None
     match = _APPROACH_TAG_RE.search(content)
     if not match:
@@ -1052,6 +1063,22 @@ def call_llm(msgs: list) -> dict:
             ai_msg = _invoke_gemini_fallback(_gemini_llm_notools, err)
             _log_token_usage(_usage_from_ai_message(ai_msg), f"{GEMINI_MODEL} (no-tools fallback from groq)")
             return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
+        except Exception as err:  # noqa: BLE001
+            # Same gap-closer as the main path below -- any Groq-side
+            # failure that isn't specifically a rate limit (a connection
+            # blip, a brief 5xx, a timeout) previously crashed straight
+            # through with no fallback attempt at all in this no-tools
+            # window (used while MCP is still connecting).
+            if _gemini_llm_notools is None:
+                raise RuntimeError(
+                    f"Groq failed unexpectedly ({err}), and no GOOGLE_API_KEY "
+                    "is set for a Gemini fallback yet. Try again in a "
+                    "moment, or add a Gemini key to .env."
+                ) from err
+            logger.info("PROVIDER FALLBACK (no-tools): Groq failed unexpectedly (%s) -> retrying with Gemini (%s)", err, GEMINI_MODEL)
+            ai_msg = _invoke_gemini_fallback(_gemini_llm_notools, err)
+            _log_token_usage(_usage_from_ai_message(ai_msg), f"{GEMINI_MODEL} (no-tools fallback from groq unexpected error)")
+            return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
         _log_token_usage(_usage_from_ai_message(ai_msg), f"{GROQ_MODEL} (no-tools fallback, MCP not ready)")
         return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
 
@@ -1100,6 +1127,27 @@ def call_llm(msgs: list) -> dict:
             ) from err
         logger.info("PROVIDER FALLBACK: Groq tool_use_failed (unrecoverable) -> retrying with Gemini (%s)", GEMINI_MODEL)
         provider_label = f"{GEMINI_MODEL} (fallback from groq tool_use_failed)"
+        ai_msg = _invoke_gemini_fallback(_gemini_llm, err)
+        _log_token_usage(_usage_from_ai_message(ai_msg), provider_label)
+        return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
+    except Exception as err:  # noqa: BLE001
+        # Anything else Groq-side -- a dropped connection, a brief 5xx, a
+        # timeout, anything NOT one of the two specific, already-handled
+        # cases above. Previously this propagated straight up uncaught,
+        # meaning ANY transient Groq hiccup (not just a rate limit or a
+        # tool-calling quirk) crashed the whole request with the generic
+        # "something went wrong" message instead of trying the Gemini
+        # fallback that's already sitting right here. One automatic retry
+        # against Gemini closes that gap the same way the other two cases
+        # already do.
+        if not _GEMINI_AVAILABLE:
+            raise RuntimeError(
+                f"Groq failed unexpectedly ({err}), and no GOOGLE_API_KEY is "
+                "set for a Gemini fallback yet. Try again in a moment, or "
+                "add a Gemini key to .env to enable automatic fallback."
+            ) from err
+        logger.info("PROVIDER FALLBACK: Groq failed unexpectedly (%s) -> retrying with Gemini (%s)", err, GEMINI_MODEL)
+        provider_label = f"{GEMINI_MODEL} (fallback from groq unexpected error)"
         ai_msg = _invoke_gemini_fallback(_gemini_llm, err)
         _log_token_usage(_usage_from_ai_message(ai_msg), provider_label)
         return {"choices": [{"message": _ai_message_to_message_dict(ai_msg)}]}
