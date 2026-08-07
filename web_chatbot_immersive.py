@@ -252,7 +252,7 @@ def _read_history(session_id: str, limit: int = 200) -> list:
     return entries[-limit:]
 
 
-def _list_conversations(limit: int = 100) -> list:
+def _list_conversations(owner_session_id: str, limit: int = 100) -> list:
     if not os.path.exists(HISTORY_LOG_PATH):
         return []
     convos = {}
@@ -268,7 +268,7 @@ def _list_conversations(limit: int = 100) -> list:
                 except json.JSONDecodeError:
                     continue
                 sid = entry.get("session_id")
-                if not sid:
+                if not sid or sid != owner_session_id:
                     continue
                 if sid not in convos:
                     convos[sid] = {
@@ -542,7 +542,9 @@ def new_chat():
 
 @app.route("/conversations", methods=["GET"])
 def conversations():
-    return jsonify({"conversations": _list_conversations()})
+    session_id, is_new = _get_or_create_session_id()
+    resp = jsonify({"conversations": _list_conversations(session_id)})
+    return _attach_session_cookie(resp, session_id) if is_new else resp
 
 
 @app.route("/delete-conversation", methods=["POST"])
